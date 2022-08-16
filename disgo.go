@@ -4,15 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/fanliao/go-promise"
-	"github.com/go-redis/redis/v8"
-	"github.com/google/uuid"
 	"log"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/fanliao/go-promise"
+	"github.com/go-redis/redis/v8"
+	"github.com/google/uuid"
 )
 
 var (
@@ -27,6 +28,7 @@ const (
 	defaultLockKeyPrefix  = "GoDistRL"
 	defaultExpiry         = 30 * time.Second
 	defaultTimeout        = 30 * time.Second
+	defaultCasSleepTime   = 100 * time.Millisecond
 	defaultPublishPostfix = "-pub"
 	defaultZSetPostfix    = "-zset"
 )
@@ -61,6 +63,7 @@ type ConfigOption struct {
 type DistLock struct {
 	expiry        time.Duration
 	timeout       time.Duration
+	casSleepTime  time.Duration
 	localLockName string
 	// hash-name
 	lockName string
@@ -114,9 +117,10 @@ func (dl *DistributedLock) Lock(ctx context.Context, expiryTime time.Duration) (
 // If the lock is successful, it will return true.
 // If the lock fails, it will enter the queue and wait to be woken up, or it will return false if it times out.
 // This is a reentrant lock.
-func (dl *DistributedLock) TryLock(ctx context.Context, expiryTime, waitTime time.Duration) (bool, error) {
+func (dl *DistributedLock) TryLock(ctx context.Context, expiryTime, waitTime, casSleepTime time.Duration) (bool, error) {
 	dl.distLock.expiry = expiryTime
 	dl.distLock.timeout = waitTime
+	dl.distLock.casSleepTime = casSleepTime
 
 	ttl, err := dl.tryAcquire(ctx, dl.distLock.lockName, dl.distLock.field, expiryTime, false)
 	if err != nil {
@@ -161,7 +165,7 @@ func (dl *DistributedLock) TryLockWithSchedule(ctx context.Context, waitTime tim
 
 // Release is a general release lock method, and all three locks above can be used.
 func (dl *DistributedLock) Release(ctx context.Context) (bool, error) {
-	cmd := luaRelease.Run(ctx, dl.redisClient, []string{dl.distLock.lockName, dl.config.lockZSetName}, int(dl.distLock.expiry/time.Millisecond), dl.distLock.field)
+	cmd := luaRelease.Run(ctx, dl.redisClient, []string{dl.distLock.lockName, dl.config.lockPublishName}, int(dl.distLock.expiry/time.Millisecond), dl.distLock.field)
 	res, err := cmd.Int64()
 	if err != nil {
 		return false, err
@@ -286,11 +290,13 @@ func (dl *DistributedLock) subscribe(ctx context.Context, lockKey, field string,
 		}
 		return false, nil
 	})
+
 	v, err, _ := f.GetOrTimeout(uint((dl.distLock.timeout / 3 * 2) / time.Millisecond))
 	if err != nil {
 		log.Fatal(err)
 		return false
 	}
+
 	err = pub.Unsubscribe(ctx)
 	if err != nil {
 		log.Fatal(err)
@@ -317,6 +323,7 @@ func (dl *DistributedLock) cas(ctx context.Context, expiryTime, waitTime time.Du
 	defer cancel()
 
 	var timer *time.Timer
+	sleepTime := dl.distLock.casSleepTime
 	for {
 		ttl, err := dl.tryAcquire(deadlinectx, dl.distLock.lockName, dl.distLock.field, expiryTime, isNeedScheduled)
 		if err != nil {
@@ -325,14 +332,8 @@ func (dl *DistributedLock) cas(ctx context.Context, expiryTime, waitTime time.Du
 			return true, nil
 		}
 
-		var sleepTime time.Duration
-		if ttl < 300 {
-			sleepTime = time.Duration(ttl)
-		} else {
-			sleepTime = time.Duration(ttl / 3)
-		}
 		if timer == nil {
-			timer = time.NewTimer(sleepTime * time.Microsecond)
+			timer = time.NewTimer(sleepTime)
 			defer timer.Stop()
 		} else {
 			timer.Reset(sleepTime)
