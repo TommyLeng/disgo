@@ -26,8 +26,8 @@ var (
 const (
 	//golang distributed redis lock
 	defaultLockKeyPrefix  = "GoDistRL"
-	defaultExpiry         = 30 * time.Second
-	defaultTimeout        = 30 * time.Second
+	defaultExpiryTime     = 30 * time.Second
+	defaultWaitTime       = 30 * time.Second
 	defaultCasSleepTime   = 100 * time.Millisecond
 	defaultPublishPostfix = "-pub"
 	defaultZSetPostfix    = "-zset"
@@ -61,9 +61,14 @@ type ConfigOption struct {
 }
 
 type DistLock struct {
-	expiry        time.Duration
-	timeout       time.Duration
-	casSleepTime  time.Duration
+	expiry   time.Duration
+	wait     time.Duration
+	casSleep time.Duration
+
+	subscribeRatio time.Duration
+	casRatio       time.Duration
+	totalRatio     time.Duration
+
 	localLockName string
 	// hash-name
 	lockName string
@@ -76,18 +81,32 @@ type DistLock struct {
 // GetLock is an initialization object that needs to pass in redisClient and the name of the lock.
 // The return value is a DistributedLock object, you need to use this
 // object to perform lock and unlock operations, or set related properties.
-func GetLock(redisClient RedisClient, lockName string) (*DistributedLock, error) {
+func GetLock(redisClient RedisClient, lockName string, expiryTime, waitTime, casSleepTime time.Duration, subscribeRatio, casRatio time.Duration) (*DistributedLock, error) {
 	config := &ConfigOption{
 		lockKeyPrefix:   defaultLockKeyPrefix,
 		lockZSetName:    defaultLockKeyPrefix + ":" + lockName + defaultZSetPostfix,
 		lockPublishName: defaultLockKeyPrefix + ":" + lockName + defaultPublishPostfix,
 	}
+	if expiryTime == 0 {
+		expiryTime = defaultExpiryTime
+	}
+	if waitTime == 0 {
+		waitTime = defaultWaitTime
+	}
+	if casSleepTime == 0 {
+		casSleepTime = defaultCasSleepTime
+	}
+
 	distList := DistLock{
-		expiry:        defaultExpiry,
-		timeout:       defaultTimeout,
-		localLockName: lockName,
-		lockName:      defaultLockKeyPrefix + ":" + lockName,
-		field:         uuid.New().String() + "-" + strconv.Itoa(getGoroutineId()),
+		expiry:         expiryTime,
+		wait:           waitTime,
+		casSleep:       casSleepTime,
+		subscribeRatio: subscribeRatio,
+		casRatio:       casRatio,
+		totalRatio:     subscribeRatio + casRatio,
+		localLockName:  lockName,
+		lockName:       defaultLockKeyPrefix + ":" + lockName,
+		field:          uuid.New().String() + "-" + strconv.Itoa(getGoroutineId()),
 	}
 	return &DistributedLock{
 		redisClient: redisClient,
@@ -99,10 +118,8 @@ func GetLock(redisClient RedisClient, lockName string) (*DistributedLock, error)
 // Lock is a normal lock and will not have any retry mechanism.
 // Notice! Because there is no retry mechanism, there is a high probability that the lock will fail under high concurrency.
 // This is a reentrant lock.
-func (dl *DistributedLock) Lock(ctx context.Context, expiryTime time.Duration) (bool, error) {
-	dl.distLock.expiry = expiryTime
-
-	ttl, err := dl.tryAcquire(ctx, dl.distLock.lockName, dl.distLock.field, expiryTime, false)
+func (dl *DistributedLock) Lock(ctx context.Context) (bool, error) {
+	ttl, err := dl.tryAcquire(ctx, dl.distLock.lockName, dl.distLock.field, false)
 	if err != nil {
 		return false, err
 	}
@@ -117,50 +134,66 @@ func (dl *DistributedLock) Lock(ctx context.Context, expiryTime time.Duration) (
 // If the lock is successful, it will return true.
 // If the lock fails, it will enter the queue and wait to be woken up, or it will return false if it times out.
 // This is a reentrant lock.
-func (dl *DistributedLock) TryLock(ctx context.Context, expiryTime, waitTime, casSleepTime time.Duration) (bool, error) {
-	dl.distLock.expiry = expiryTime
-	dl.distLock.timeout = waitTime
-	dl.distLock.casSleepTime = casSleepTime
-
-	ttl, err := dl.tryAcquire(ctx, dl.distLock.lockName, dl.distLock.field, expiryTime, false)
+func (dl *DistributedLock) TryLock(ctx context.Context) (bool, string, error) {
+	remark := "Acquire"
+	ttl, err := dl.tryAcquire(ctx, dl.distLock.lockName, dl.distLock.field, false)
 	if err != nil {
-		return false, err
+		return false, remark, errors.New("TryLock:dl.tryAcquire, err=[ " + err.Error() + " ]")
 	}
 	if ttl == 0 {
-		return true, nil
+		return true, remark, nil
 	}
 
 	// Enter the waiting queue, waiting to be woken up
-	succ := dl.subscribe(ctx, dl.distLock.lockName, dl.distLock.field, expiryTime, false)
-	if succ {
-		return true, nil
+	remark = "subscribe"
+	isSubscribeSuccess, subscribeErr := dl.subscribe(ctx, dl.distLock.lockName, dl.distLock.field, false)
+	if isSubscribeSuccess {
+		return true, remark, nil
 	}
 	// CAS
-	return dl.cas(ctx, expiryTime, waitTime, false)
+	remark = "cas"
+	isCasSuccess, lockCnt, err := dl.cas(ctx, false)
+	remark = "cas-" + strconv.FormatInt(int64(lockCnt), 10)
+	if err != nil {
+		return false, remark, errors.New("TryLock:dl.cas, subscribeErr=[ " + subscribeErr.Error() + " ], err=[ " + err.Error() + " ]")
+	}
+	if isCasSuccess {
+		return true, remark, nil
+	}
+	return false, remark, nil
 }
 
 // TryLockWithSchedule is the same as TryLock,
 // but it will open an additional thread to ensure that the lock will not expire in advance,
 // which means that you must release the lock manually, otherwise a deadlock will occur.
 // This is a reentrant lock.
-func (dl *DistributedLock) TryLockWithSchedule(ctx context.Context, waitTime time.Duration) (bool, error) {
-	dl.distLock.timeout = waitTime
-
-	ttl, err := dl.tryAcquire(ctx, dl.distLock.lockName, dl.distLock.field, dl.distLock.expiry, true)
+func (dl *DistributedLock) TryLockWithSchedule(ctx context.Context) (bool, string, error) {
+	remark := "Acquire"
+	ttl, err := dl.tryAcquire(ctx, dl.distLock.lockName, dl.distLock.field, true)
 	if err != nil {
-		return true, err
+		return false, remark, errors.New("TryLockWithSchedule:dl.tryAcquire, err=[ " + err.Error() + " ]")
 	}
 	if ttl == 0 {
-		return true, nil
+		return true, remark, nil
 	}
 
 	// Enter the waiting queue, waiting to be woken up
-	succ := dl.subscribe(ctx, dl.distLock.lockName, dl.distLock.field, dl.distLock.expiry, true)
-	if succ {
-		return true, nil
+	remark = "subscribe"
+	isSubscribeSuccess, subscribeErr := dl.subscribe(ctx, dl.distLock.lockName, dl.distLock.field, true)
+	if isSubscribeSuccess {
+		return true, remark, nil
 	}
+
 	// CAS
-	return dl.cas(ctx, dl.distLock.expiry, waitTime, true)
+	isCasSuccess, lockCnt, err := dl.cas(ctx, true)
+	remark = "cas-" + strconv.FormatInt(int64(lockCnt), 10)
+	if err != nil {
+		return false, remark, errors.New("TryLockWithSchedule:dl.cas, subscribeErr=[ " + subscribeErr.Error() + " ], err=[ " + err.Error() + " ]")
+	}
+	if isCasSuccess {
+		return true, remark, nil
+	}
+	return false, remark, nil
 }
 
 // Release is a general release lock method, and all three locks above can be used.
@@ -202,8 +235,8 @@ func (dl *DistributedLock) SetLockKeyPrefix(prefix string) {
 // -------------Minimum method---------------
 
 // tryAcquire is the smallest unit of locking, and will use lua script for locking operation
-func (dl *DistributedLock) tryAcquire(ctx context.Context, key, value string, releaseTime time.Duration, isNeedScheduled bool) (int64, error) {
-	cmd := luaAcquire.Run(ctx, dl.redisClient, []string{key}, int(releaseTime/time.Millisecond), value)
+func (dl *DistributedLock) tryAcquire(ctx context.Context, key, value string, isNeedScheduled bool) (int64, error) {
+	cmd := luaAcquire.Run(ctx, dl.redisClient, []string{key}, int(dl.distLock.expiry/time.Millisecond), value)
 	ttl, err := cmd.Int64()
 	if err != nil {
 		// int64 is not important
@@ -262,13 +295,23 @@ func (dl *DistributedLock) scheduleExpirationRenewal(ctx context.Context, key, f
 
 // subscribe uses the zset of redis as the queue, and the subscription channel enters the blocking state,
 // it will be woken up when the lock is available, and the thread at the head of the queue will try to lock.
-func (dl *DistributedLock) subscribe(ctx context.Context, lockKey, field string, releaseTime time.Duration, isNeedScheduled bool) bool {
+func (dl *DistributedLock) subscribe(ctx context.Context, lockKey, field string, isNeedScheduled bool) (bool, error) {
+	waitTime := dl.distLock.wait * dl.distLock.subscribeRatio / dl.distLock.totalRatio
+
 	// Push your own id to the message queue and queue
-	cmd := luaZSet.Run(ctx, dl.redisClient, []string{dl.config.lockZSetName}, time.Now().Add(dl.distLock.timeout/3*2).UnixMicro(), field, time.Now().UnixMicro())
-	if cmd.Err() != nil {
-		log.Fatal(cmd.Err())
-		return false
+	cmd := luaZSet.Run(ctx, dl.redisClient, []string{dl.config.lockZSetName}, time.Now().Add(waitTime).UnixMicro(), field, time.Now().UnixMicro())
+	err := cmd.Err()
+	if err != nil {
+		return false, errors.New("subscribe:luaZSet.Run, err=[ " + err.Error() + " ]")
 	}
+
+	defer func() {
+		cmd := dl.redisClient.ZRem(ctx, dl.config.lockZSetName, field)
+		err = cmd.Err()
+		if err != nil {
+			log.Printf("subscribe:defer ZREM, err=[ " + err.Error() + " ]")
+		}
+	}()
 
 	// Subscribe to the channel, block the thread waiting for the message
 	pub := dl.redisClient.Subscribe(ctx, dl.config.lockPublishName)
@@ -276,12 +319,8 @@ func (dl *DistributedLock) subscribe(ctx context.Context, lockKey, field string,
 		for range pub.Channel() {
 			cmd := dl.redisClient.ZRevRange(ctx, dl.config.lockZSetName, -1, -1)
 			if cmd != nil && cmd.Val()[0] == field {
-				ttl, _ := dl.tryAcquire(ctx, lockKey, field, releaseTime, isNeedScheduled)
+				ttl, _ := dl.tryAcquire(ctx, lockKey, field, isNeedScheduled)
 				if ttl == 0 {
-					cmd := dl.redisClient.ZRem(ctx, dl.config.lockZSetName, field)
-					if cmd.Err() != nil {
-						log.Fatal(cmd.Err())
-					}
 					return true, nil
 				} else {
 					continue
@@ -291,26 +330,26 @@ func (dl *DistributedLock) subscribe(ctx context.Context, lockKey, field string,
 		return false, nil
 	})
 
-	v, err, _ := f.GetOrTimeout(uint((dl.distLock.timeout / 3 * 2) / time.Millisecond))
+	v, err, isTimeOut := f.GetOrTimeout(uint(waitTime / time.Millisecond))
 	if err != nil {
-		log.Fatal(err)
-		return false
+		return false, errors.New("subscribe:GetOrTimeout, err=[ " + err.Error() + " ]")
+	}
+	if isTimeOut {
+		return false, errors.New("subscribe:GetOrTimeout, err=[ timeout ]")
 	}
 
 	err = pub.Unsubscribe(ctx)
 	if err != nil {
-		log.Fatal(err)
-		return false
+		return false, errors.New("subscribe:pub.Unsubscribe, err=[ " + err.Error() + " ]")
 	}
 	err = pub.Close()
 	if err != nil {
-		log.Fatal(err)
-		return false
+		return false, errors.New("subscribe:pub.Close, err=[ " + err.Error() + " ]")
 	}
 	if v != nil && v.(bool) {
-		return true
+		return true, nil
 	} else {
-		return false
+		return false, errors.New("subscribe:, err=[ v is nil ]")
 	}
 }
 
@@ -318,18 +357,22 @@ func (dl *DistributedLock) subscribe(ctx context.Context, lockKey, field string,
 // Due to the possibility of CPU time slice switching, the locking failure in subscribe or the subscription time is too long,
 // cas determines the lock snatching time by using the TTL of lock holding,
 // which can make up for the lock snatching failure caused by CPU time slice switching.
-func (dl *DistributedLock) cas(ctx context.Context, expiryTime, waitTime time.Duration, isNeedScheduled bool) (bool, error) {
+func (dl *DistributedLock) cas(ctx context.Context, isNeedScheduled bool) (bool, int64, error) {
+	waitTime := dl.distLock.wait * dl.distLock.casRatio / dl.distLock.totalRatio
+
 	deadlinectx, cancel := context.WithDeadline(ctx, time.Now().Add(waitTime))
 	defer cancel()
 
 	var timer *time.Timer
-	sleepTime := dl.distLock.casSleepTime
+	sleepTime := dl.distLock.casSleep
+	lockCnt := int64(0)
 	for {
-		ttl, err := dl.tryAcquire(deadlinectx, dl.distLock.lockName, dl.distLock.field, expiryTime, isNeedScheduled)
+		lockCnt++
+		ttl, err := dl.tryAcquire(deadlinectx, dl.distLock.lockName, dl.distLock.field, isNeedScheduled)
 		if err != nil {
-			return false, err
+			return false, lockCnt, errors.New("cas:tryAcquire, err=[ " + err.Error() + " ]")
 		} else if ttl == 0 {
-			return true, nil
+			return true, lockCnt, nil
 		}
 
 		if timer == nil {
@@ -341,7 +384,7 @@ func (dl *DistributedLock) cas(ctx context.Context, expiryTime, waitTime time.Du
 
 		select {
 		case <-deadlinectx.Done():
-			return false, errors.New("waiting time out")
+			return false, lockCnt, errors.New("cas:deadlinectx.Done(), err=[ waiting timeout ]")
 		case <-timer.C:
 		}
 	}
