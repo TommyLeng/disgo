@@ -34,27 +34,27 @@ func connectRedis(dsn string, idle, pool int) (*redis.Client, error) {
 func lockProcess(i int) {
 	ctx := context.Background()
 	lockKey := "TestLockKey"
-	lock, err := GetLock(RDS, lockKey, 30*time.Second, 30*time.Second, 25*time.Millisecond, 4, 1)
+	lock, err := GetLock(RDS, lockKey, 30*time.Second, 10*time.Second, 25*time.Millisecond, 4, 1)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	lockNow := time.Now()
-	fmt.Printf("%d, lock start: %v, %v\n", i, lock.distLock.field, lockNow)
+	fmt.Printf("%d, lock start, now: %v, field: %v\n", i, lockNow, lock.distLock.field)
 	isSuccess, remark, err := lock.TryLock(ctx)
 	if err != nil {
-		fmt.Printf("dur: %v, err: %v, %v\n", time.Since(lockNow), remark, err)
+		fmt.Printf("%d, lock err,   now: %v, field: %v, dur: %v, remark: %v, err: %v\n", i, time.Now(), lock.distLock.field, time.Since(lockNow), remark, err)
 		return
 	}
 	if !isSuccess {
-		fmt.Printf("dur: %v, err: %v, %v\n", time.Since(lockNow), remark, "isSuccess=false")
+		fmt.Printf("%d, lock err,   now: %v, field: %v, dur: %v, remark: %v, err: %v\n", i, time.Now(), lock.distLock.field, time.Since(lockNow), remark, "isSuccess=false")
 		return
 	}
 	defer lock.Release(ctx)
 
-	fmt.Printf("%d, lock wait:  %v, %v, %v\n", i, lock.distLock.field, time.Since(lockNow), remark)
-	time.Sleep(3 * time.Second)
-	fmt.Printf("%d, lock end:   %v, %v, %v\n", i, lock.distLock.field, time.Since(lockNow), remark)
+	fmt.Printf("%d, lock wait:  now: %v, field: %v, dur: %v, remark: %v\n", i, time.Now(), lock.distLock.field, time.Since(lockNow), remark)
+	time.Sleep(2 * time.Second)
+	fmt.Printf("%d, lock end:   now: %v, field: %v, dur: %v, remark: %v\n", i, time.Now(), lock.distLock.field, time.Since(lockNow), remark)
 }
 
 func TestLock(t *testing.T) {
@@ -65,13 +65,13 @@ func TestLock(t *testing.T) {
 
 	wg := sync.WaitGroup{}
 
-	for i := 0; i < 25; i++ {
+	for i := 0; i < 30; i++ {
 		wg.Add(1)
 		go func(i int) {
 			lockProcess(i)
 			wg.Done()
 		}(i)
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	wg.Wait()
