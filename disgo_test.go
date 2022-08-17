@@ -35,12 +35,12 @@ func lockProcess(i int) {
 	ctx := context.Background()
 	lockKey := "TestLockKey"
 	lockConfig := &LockConfig{
-		expiryTime:         30 * time.Second,
-		waitTime:           10 * time.Second,
-		subscribeSleepTime: 200 * time.Millisecond,
-		casSleepTime:       25 * time.Millisecond,
-		subscribeRatio:     4,
-		casRatio:           1,
+		ExpiryTime:         30 * time.Second,
+		WaitTime:           10 * time.Second,
+		SubscribeSleepTime: 200 * time.Millisecond,
+		CasSleepTime:       25 * time.Millisecond,
+		SubscribeRatio:     4,
+		CasRatio:           1,
 	}
 	lock, err := GetLock(RDS, lockKey, lockConfig)
 	if err != nil {

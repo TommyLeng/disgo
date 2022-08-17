@@ -81,12 +81,12 @@ type DistLock struct {
 }
 
 type LockConfig struct {
-	expiryTime         time.Duration
-	waitTime           time.Duration
-	subscribeSleepTime time.Duration
-	casSleepTime       time.Duration
-	subscribeRatio     time.Duration
-	casRatio           time.Duration
+	ExpiryTime         time.Duration
+	WaitTime           time.Duration
+	SubscribeSleepTime time.Duration
+	CasSleepTime       time.Duration
+	SubscribeRatio     time.Duration
+	CasRatio           time.Duration
 }
 
 // -------------The DisGo's API---------------
@@ -109,12 +109,12 @@ func GetLock(redisClient RedisClient, lockName string, lockConfig *LockConfig) (
 	subscribeRatio := defaultSubscribeRatio
 
 	if lockConfig != nil {
-		expiryTime = lockConfig.expiryTime
-		waitTime = lockConfig.waitTime
-		casSleepTime = lockConfig.casSleepTime
-		subscribeSleepTime = lockConfig.subscribeSleepTime
-		casRatio = lockConfig.casRatio
-		subscribeRatio = lockConfig.subscribeRatio
+		expiryTime = lockConfig.ExpiryTime
+		waitTime = lockConfig.WaitTime
+		casSleepTime = lockConfig.CasSleepTime
+		subscribeSleepTime = lockConfig.SubscribeSleepTime
+		casRatio = lockConfig.CasRatio
+		subscribeRatio = lockConfig.SubscribeRatio
 	}
 
 	distList := DistLock{
