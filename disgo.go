@@ -30,6 +30,8 @@ const (
 	defaultWaitTime           = 30 * time.Second
 	defaultCasSleepTime       = 100 * time.Millisecond
 	defaultSubscribeSleepTime = 500 * time.Millisecond
+	defaultCasRatio           = time.Duration(1)
+	defaultSubscribeRatio     = time.Duration(4)
 	defaultPublishPostfix     = "-pub"
 	defaultZSetPostfix        = "-zset"
 )
@@ -78,28 +80,41 @@ type DistLock struct {
 	field string
 }
 
+type LockConfig struct {
+	expiryTime         time.Duration
+	waitTime           time.Duration
+	subscribeSleepTime time.Duration
+	casSleepTime       time.Duration
+	subscribeRatio     time.Duration
+	casRatio           time.Duration
+}
+
 // -------------The DisGo's API---------------
 
 // GetLock is an initialization object that needs to pass in redisClient and the name of the lock.
 // The return value is a DistributedLock object, you need to use this
 // object to perform lock and unlock operations, or set related properties.
-func GetLock(redisClient RedisClient, lockName string, expiryTime, waitTime, subscribeSleepTime, casSleepTime time.Duration, subscribeRatio, casRatio time.Duration) (*DistributedLock, error) {
+func GetLock(redisClient RedisClient, lockName string, lockConfig *LockConfig) (*DistributedLock, error) {
 	config := &ConfigOption{
 		lockKeyPrefix:   defaultLockKeyPrefix,
 		lockZSetName:    defaultLockKeyPrefix + ":" + lockName + defaultZSetPostfix,
 		lockPublishName: defaultLockKeyPrefix + ":" + lockName + defaultPublishPostfix,
 	}
-	if expiryTime == 0 {
-		expiryTime = defaultExpiryTime
-	}
-	if waitTime == 0 {
-		waitTime = defaultWaitTime
-	}
-	if casSleepTime == 0 {
-		casSleepTime = defaultCasSleepTime
-	}
-	if subscribeSleepTime == 0 {
-		subscribeSleepTime = defaultSubscribeSleepTime
+
+	expiryTime := defaultExpiryTime
+	waitTime := defaultWaitTime
+	casSleepTime := defaultCasSleepTime
+	subscribeSleepTime := defaultSubscribeSleepTime
+	casRatio := defaultCasRatio
+	subscribeRatio := defaultSubscribeRatio
+
+	if lockConfig != nil {
+		expiryTime = lockConfig.expiryTime
+		waitTime = lockConfig.waitTime
+		casSleepTime = lockConfig.casSleepTime
+		subscribeSleepTime = lockConfig.subscribeSleepTime
+		casRatio = lockConfig.casRatio
+		subscribeRatio = lockConfig.subscribeRatio
 	}
 
 	distList := DistLock{
