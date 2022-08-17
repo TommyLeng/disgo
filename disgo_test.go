@@ -34,7 +34,7 @@ func connectRedis(dsn string, idle, pool int) (*redis.Client, error) {
 func lockProcess(i int) {
 	ctx := context.Background()
 	lockKey := "TestLockKey"
-	lock, err := GetLock(RDS, lockKey, 30*time.Second, 10*time.Second, 25*time.Millisecond, 4, 1)
+	lock, err := GetLock(RDS, lockKey, 30*time.Second, 10*time.Second, 200*time.Millisecond, 25*time.Millisecond, 4, 1)
 	if err != nil {
 		fmt.Println(err)
 		return

@@ -25,12 +25,13 @@ var (
 
 const (
 	//golang distributed redis lock
-	defaultLockKeyPrefix  = "GoDistRL"
-	defaultExpiryTime     = 30 * time.Second
-	defaultWaitTime       = 30 * time.Second
-	defaultCasSleepTime   = 100 * time.Millisecond
-	defaultPublishPostfix = "-pub"
-	defaultZSetPostfix    = "-zset"
+	defaultLockKeyPrefix      = "GoDistRL"
+	defaultExpiryTime         = 30 * time.Second
+	defaultWaitTime           = 30 * time.Second
+	defaultCasSleepTime       = 100 * time.Millisecond
+	defaultSubscribeSleepTime = 500 * time.Millisecond
+	defaultPublishPostfix     = "-pub"
+	defaultZSetPostfix        = "-zset"
 )
 
 // theFutureOfSchedule is used to store the Future with the daemon thread turned on,
@@ -61,9 +62,10 @@ type ConfigOption struct {
 }
 
 type DistLock struct {
-	expiry   time.Duration
-	wait     time.Duration
-	casSleep time.Duration
+	expiry         time.Duration
+	wait           time.Duration
+	casSleep       time.Duration
+	subscribeSleep time.Duration
 
 	subscribeRatio time.Duration
 	casRatio       time.Duration
@@ -81,7 +83,7 @@ type DistLock struct {
 // GetLock is an initialization object that needs to pass in redisClient and the name of the lock.
 // The return value is a DistributedLock object, you need to use this
 // object to perform lock and unlock operations, or set related properties.
-func GetLock(redisClient RedisClient, lockName string, expiryTime, waitTime, casSleepTime time.Duration, subscribeRatio, casRatio time.Duration) (*DistributedLock, error) {
+func GetLock(redisClient RedisClient, lockName string, expiryTime, waitTime, subscribeSleepTime, casSleepTime time.Duration, subscribeRatio, casRatio time.Duration) (*DistributedLock, error) {
 	config := &ConfigOption{
 		lockKeyPrefix:   defaultLockKeyPrefix,
 		lockZSetName:    defaultLockKeyPrefix + ":" + lockName + defaultZSetPostfix,
@@ -96,11 +98,15 @@ func GetLock(redisClient RedisClient, lockName string, expiryTime, waitTime, cas
 	if casSleepTime == 0 {
 		casSleepTime = defaultCasSleepTime
 	}
+	if subscribeSleepTime == 0 {
+		subscribeSleepTime = defaultSubscribeSleepTime
+	}
 
 	distList := DistLock{
 		expiry:         expiryTime,
 		wait:           waitTime,
 		casSleep:       casSleepTime,
+		subscribeSleep: subscribeSleepTime,
 		subscribeRatio: subscribeRatio,
 		casRatio:       casRatio,
 		totalRatio:     subscribeRatio + casRatio,
@@ -316,7 +322,7 @@ func (dl *DistributedLock) subscribe(ctx context.Context, lockKey, field string,
 	// Subscribe to the channel, block the thread waiting for the message
 	pub := dl.redisClient.Subscribe(ctx, dl.config.lockPublishName)
 	lockCnt := int64(0)
-	
+
 	isGetLockFromChannel := false
 	f := promise.Start(func() (v interface{}, err error) {
 		// Try to prevent other process release lock here
@@ -326,7 +332,7 @@ func (dl *DistributedLock) subscribe(ctx context.Context, lockKey, field string,
 		}
 
 		// Try to prevent other process release lock here, it will wake the queue after 500 millisecond
-		t := time.NewTicker(500 * time.Millisecond)
+		t := time.NewTicker(dl.distLock.subscribeSleep)
 		defer t.Stop()
 		for {
 			select {
@@ -398,8 +404,7 @@ func (dl *DistributedLock) cas(ctx context.Context, isNeedScheduled bool) (bool,
 		return true, lockCnt, nil
 	}
 
-	sleepTime := dl.distLock.casSleep
-	timer := time.NewTicker(sleepTime)
+	timer := time.NewTicker(dl.distLock.casSleep)
 	defer timer.Stop()
 
 	for {
