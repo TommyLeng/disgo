@@ -65,6 +65,7 @@ func lockProcess(i int) {
 	fmt.Printf("%d, lock end:   now: %v, field: %v, dur: %v, remark: %v\n", i, time.Now(), lock.distLock.field, time.Since(lockNow), remark)
 }
 
+//go test -timeout 30s -run ^TestLock$ github.com/TommyLeng/disgo -v -count=1
 func TestLock(t *testing.T) {
 	_, err := connectRedis("redis://192.168.1.121:6379/0", 2, 4)
 	if err != nil {

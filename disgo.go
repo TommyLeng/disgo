@@ -461,10 +461,15 @@ func getGoroutineId() int {
 
 func (dl *DistributedLock) subscribeLock(ctx context.Context, lockKey, field string, isNeedScheduled bool) bool {
 	cmd := dl.redisClient.ZRevRange(ctx, dl.config.lockZSetName, -1, -1)
-	if cmd != nil && cmd.Val()[0] == field {
-		ttl, _ := dl.tryAcquire(ctx, lockKey, field, isNeedScheduled)
-		if ttl == 0 {
-			return true
+	if cmd != nil {
+		c := cmd.Val()
+		if len(c) > 0 {
+			if c[0] == field {
+				ttl, _ := dl.tryAcquire(ctx, lockKey, field, isNeedScheduled)
+				if ttl == 0 {
+					return true
+				}
+			}
 		}
 	}
 	return false
