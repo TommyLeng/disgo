@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/fanliao/go-promise"
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 	"github.com/google/uuid"
 )
 
@@ -42,13 +42,15 @@ const (
 var theFutureOfSchedule = sync.Map{}
 
 type RedisClient interface {
-	Eval(ctx context.Context, script string, keys []string, args ...interface{}) *redis.Cmd
-	EvalSha(ctx context.Context, sha1 string, keys []string, args ...interface{}) *redis.Cmd
+	Eval(ctx context.Context, script string, keys []string, args ...any) *redis.Cmd
+	EvalSha(ctx context.Context, sha1 string, keys []string, args ...any) *redis.Cmd
+	EvalRO(ctx context.Context, script string, keys []string, args ...any) *redis.Cmd
+	EvalShaRO(ctx context.Context, sha1 string, keys []string, args ...any) *redis.Cmd
 	ScriptExists(ctx context.Context, hashes ...string) *redis.BoolSliceCmd
 	ScriptLoad(ctx context.Context, script string) *redis.StringCmd
 	Subscribe(ctx context.Context, channels ...string) *redis.PubSub
 	ZRevRange(ctx context.Context, key string, start, stop int64) *redis.StringSliceCmd
-	ZRem(ctx context.Context, key string, members ...interface{}) *redis.IntCmd
+	ZRem(ctx context.Context, key string, members ...any) *redis.IntCmd
 }
 
 type DistributedLock struct {

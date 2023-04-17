@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	redis "github.com/go-redis/redis/v8"
+	redis "github.com/redis/go-redis/v9"
 )
 
 var RDS *redis.Client
@@ -20,7 +20,7 @@ func connectRedis(dsn string, idle, pool int) (*redis.Client, error) {
 
 	rdsOpts.MinIdleConns = idle
 	rdsOpts.PoolSize = pool
-	rdsOpts.MaxConnAge = 5 * time.Minute
+	rdsOpts.ConnMaxLifetime = 5 * time.Minute
 
 	rds := redis.NewClient(rdsOpts)
 	_, err = rds.Ping(context.Background()).Result()
